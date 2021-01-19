@@ -42,7 +42,9 @@ const ebnfParser = pegjs.generate(`
     case '+':
       return {type: 'OneOrMore', item: p, repeat: {type: 'Skip'}};
     case '*':
-      return {type: 'OneOrMore', item: {type: 'Skip'}, repeat: p};
+      return options.context.isRTLCapable(p) ?
+        {type: 'OneOrMore', item: {type: 'Skip'}, repeat: p} :
+        {type: 'Optional', item: {type: 'OneOrMore', item: p, repeat: {type: 'Skip'}}};
     default:
       return p;
     }
@@ -105,6 +107,34 @@ function deepEq(a, b) {
 }
 
 /**
+ * Checks whether the component can be read from right to left. This also means
+ * the component is only one node wide.
+ *
+ * @param {RRComponent} a -
+ *  the railroad component
+ * @returns {boolean} whether the component can be read from right to left
+ */
+function isRTLCapable(a) {
+  switch (a.type) {
+    case 'Skip':
+    case 'Terminal':
+    case 'NonTerminal':
+      return true;
+    case 'Optional':
+      return isRTLCapable(a.item);
+    case 'OneOrMore':
+      return isRTLCapable(a.item) && isRTLCapable(a.repeat);
+    case 'Choice':
+      return a.options.every(isRTLCapable);
+    case 'Sequence':
+    case 'OptionalSequence':
+    case 'Stack':
+      const length = a.items.length;
+      return length === 1 ? isRTLCapable(a.items[0]) : length === 0;
+  }
+}
+
+/**
  * Appends an EBNF node to a Choice container.
  *
  * This function will also try to optimize the pattern `a | a? b` or `b? | a b?`
@@ -151,18 +181,19 @@ function appendNodeToChoices(opts, node) {
  */
 function appendNodeToSequence(items, node) {
   if (
-    node.type === 'OneOrMore' &&
-    node.item.type === 'Skip' &&
-    node.repeat.type === 'Sequence' &&
-    node.repeat.items.length === 2
+    node.type === 'Optional' &&
+    node.item.type === 'OneOrMore' &&
+    node.item.repeat.type === 'Skip' &&
+    node.item.item.type === 'Sequence' &&
+    node.item.item.items.length === 2
   ) {
     const left = items[items.length - 1]
-    const right = node.repeat.items[1]
-    if (deepEq(left, right)) {
+    const [ repeat, right ] = node.item.item.items;
+    if (isRTLCapable(repeat) && deepEq(left, right)) {
       items[items.length - 1] = {
         type: 'OneOrMore',
         item: left,
-        repeat: node.repeat.items[0],
+        repeat,
       }
       return
     }
@@ -238,7 +269,7 @@ anafanafoPromise.then(mod => {
 
     try {
       const grammar = ebnfParser.parse(code, {
-        context: { appendNodeToChoices, appendNodeToSequence },
+        context: { appendNodeToChoices, appendNodeToSequence, isRTLCapable },
       })
       diagrams = grammar
         .map(({ name, content }) => {
